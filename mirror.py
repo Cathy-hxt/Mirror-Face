@@ -1,51 +1,39 @@
-import cv2
 import os
 import json
+import cv2
 import numpy as np
 import datetime
 import atexit
-from deepface import DeepFace
 import time
 import requests
-import matplotlib.pyplot as plt
-from matplotlib.patches import FancyArrowPatch
 from collections import Counter
-import atexit
 import io
-from PIL import Image
-from qianfan import Qianfan
-from qianfan.resources.console.iam import IAM
-from openai import OpenAI
-import textwrap
-from PIL import Image, ImageDraw, ImageFont, ImageTk
-import tkinter as tk
-import matplotlib.animation as animation
-import screeninfo
-from screeninfo import get_monitors
 import threading
+import tkinter as tk
+from matplotlib import pyplot as plt
+from matplotlib.patches import FancyArrowPatch
+from PIL import Image, ImageDraw, ImageFont, ImageTk
+from screeninfo import get_monitors
+from deepface import DeepFace
+from openai import OpenAI
+from qianfan.resources.console.iam import IAM
 
-# ----------------- 人脸检测的时间变量 -----------------
-face_present = False
-face_start_time = None
-face_end_time = None
-recognizing = False
-# ------------------Face++ API Key-------------------
+# ------------------ 常量配置 ---------------------
+# Face++ API 配置
 FACEPP_API_KEY = "qWTsVPmDQmwxnpveEbcAt0FGUklv6bBW"
 FACEPP_API_SECRET = "abUpRXtULBRMT6PxkyouaO7OnEt9tP6v"
 
-# ------------------百度千帆 API Key-------------------
-AccessKeyID = "ALTAKZyDAaT3UU2MudxB2u5Xzn"
-AccessKeySecret = "7149e58678a74c87b5502f44ae667dd9"
+# 百度千帆 API 配置
+ACCESS_KEY_ID = "ALTAKZyDAaT3UU2MudxB2u5Xzn"
+ACCESS_KEY_SECRET = "7149e58678a74c87b5502f44ae667dd9"
 
-# ----------------- 文件路径 -----------------
+# 文件路径配置
 EMBEDDINGS_FILE = r"E:\emotion_db\face_embeddings.npz"
 IDS_FILE = r"E:\emotion_db\face_ids.json"
 LOGS_FILE = r"E:\emotion_db\emotion_logs.json"
+FACE_DB_PATH = r"E:\emotion_db\face_db"  # 存储人脸图片的数据库目录
 
-# ----------------- 人脸库路径 -----------------
-FACE_DB_PATH = r"E:\emotion_db\face_db"  # 你要保证这个文件夹存在，里面存图片用作DeepFace.find数据库
-
-# ----------------- 加载持久化数据 -----------------
+# ------------------ 加载持久化数据 ---------------------
 if os.path.exists(EMBEDDINGS_FILE):
     data = np.load(EMBEDDINGS_FILE)
     known_face_embeddings = [data[key] for key in data.files]
@@ -64,8 +52,9 @@ if os.path.exists(LOGS_FILE):
 else:
     emotion_logs = {}
 
-# ----------------- 保存数据函数 -----------------
+# ------------------ 保存数据 ---------------------
 def save_state():
+    """保存当前的情绪识别数据、ID和日志到文件。"""
     if known_face_embeddings:
         np.savez(EMBEDDINGS_FILE, *known_face_embeddings)
     with open(IDS_FILE, 'w', encoding='utf-8') as f:
@@ -75,10 +64,10 @@ def save_state():
 
 atexit.register(save_state)
 
-# ----------------- Face++人脸检测函数 -----------------
-def facepp_detect(FACEPP_API_KEY , FACEPP_API_SECRET, face_img):
+# ------------------ Face++ API 人脸检测 ---------------------
+def facepp_detect(face_img):
+    """使用Face++ API进行人脸检测并返回情绪、性别、年龄等属性。"""
     url = "https://api-cn.faceplusplus.com/facepp/v3/detect"
-    # 编码为 jpg 并获取字节流
     ret, buf = cv2.imencode('.jpg', face_img)
     if not ret:
         print("图像编码失败")
@@ -89,8 +78,8 @@ def facepp_detect(FACEPP_API_KEY , FACEPP_API_SECRET, face_img):
     params = {
         "api_key": FACEPP_API_KEY,
         "api_secret": FACEPP_API_SECRET,
-        "return_attributes": "emotion,gender,age,beauty",  # 需检测的属性（情绪、性别、年龄、颜值）
-        "return_landmark": 0  # 不检测关键点，可选 0/1/2
+        "return_attributes": "emotion,gender,age,beauty",
+        "return_landmark": 0  # 不返回面部关键点
     }
     
     try:
@@ -101,94 +90,59 @@ def facepp_detect(FACEPP_API_KEY , FACEPP_API_SECRET, face_img):
         print(f"请求失败：{str(e)}")
         return None
 
-# ----------------- OpenCV 人脸检测 -----------------
-face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-)
+# ------------------ OpenCV 人脸检测 ---------------------
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
-# ----------------- AI对话API配置 -----------------
-client = OpenAI(
-    api_key="bce-v3/ALTAK-6IRSzgWrWUIuKxDGDu7J4/967e7d35e7d53c496a793dff4d5834e3e911e850;ZjkyZmQ2YmQxZTQ3NDcyNjk0ZTg1ZjYyYjlkZjNjODB8AAAAAAYCAADdZDVD4YcHu+BqhbfHLlyBSftws7uRNFuTATBl/DPV2ZsKjHS9pyMw8Nfh/uGCe5a5vhHRLrxDv2p1+GRq3AKBdbBqLhfS3nCZ2MEYcUqg3TBbeSgjwPIVwHaDXFLDxQwhLnIXRyv9dpYhNwzM5TLeJvb7PD/fP4UfunUu26kayyzuG853AfWQFMmv3a7QxgWfiMxGFIpRIZHATMxfa93MXiDVBDhW0tJUpjjYXY8qSesLuvAbhoNVf7H4W29n3rJ8Bjt9kvWtVquF8vFV/joE2pAeklYdWzsFJ7tnX0IInBQdYyp5B58se2jp7QypUrQIa9f8Z90ErHqspasu4oi2z0grfeTLUcAHod0sdes4yRIaN5yn+FeeXGjG7/mOCnskIFr7v+fcL5db/+9qw9qQO/GqWf5UuGcTKKVVWPA+nzJQVPPXxqnAbLPB+uRhwqE=",
-    base_url="https://qianfan.baidubce.com/v2",
-)
+# ------------------ AI 对话 API 配置 ---------------------
+client = OpenAI(api_key="YOUR_API_KEY", base_url="https://api.openai.com")
 
-# ----------------- AI对话情绪表情映射 -----------------
+# ------------------ 情绪表情映射 ---------------------
 emotion_emoji = {
-        "happiness": "😀", "neutral": "😐", "sadness": "😞", "anger": "😡", "fear": "😨",
-        "disgust": "😷", "surprise": "😱", "unknown": "❓", "": ""
+    "happiness": "😀", "neutral": "😐", "sadness": "😞", "anger": "😡", "fear": "😨",
+    "disgust": "😷", "surprise": "😱", "unknown": "❓", "": ""
 }
 
+# ------------------ AI 对话生成 ---------------------
 def get_chat_response(name, emotion, gender, age, beauty_score):
-    prompt = f"用户 {name} 当前情绪为 {emotion},性别：{gender},年龄：{age} 岁, 颜值：{beauty_score} 分(满分100,大于60就是属于是帅或美了)。请生成一句自然的对话内容，表达对用户情绪的理解或者安慰等。（不需要在对话中提及用户具体年龄，性别和颜值分数，不需要和用户继续发生对话。可以根据用户信息加上一个不要太油腻的称呼。 输出英文）"
+    """根据用户的情绪信息生成对话内容。"""
+    prompt = f"User {name} is feeling {emotion}, gender: {gender}, age: {age} years, beauty score: {beauty_score} out of 100. Please generate a natural conversation to express understanding or comfort."
     completion = client.chat.completions.create(
         model="ernie-3.5-8k",
         messages=[{'role': 'user', 'content': prompt}]
     )
     return completion.choices[0].message.content.strip()
 
-
-def get_emotion_clock_img(emotion_logs, person_id):
-    """
-    生成艺术感更强的情绪时钟图片，返回OpenCV格式
-    """
-
-    # 设置支持中文的字体
-    plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
-    plt.rcParams['axes.unicode_minus'] = False
-
-    # 取今天的情绪日志
-    hours = list(range(7, 19))  # 7:00-18:00 共12小时
-    times = [f"{h}:00" for h in hours]
+# ------------------ 情绪时钟生成 ---------------------
+def get_emotion_clock_img(person_id):
+    """为指定的用户生成情绪时钟图像。"""
     today = datetime.datetime.now().date().isoformat()
-    person_logs = [
-        log for log in emotion_logs.get(person_id, [])
-        if log['timestamp'][:10] == today
-    ]
-    # 归类到距离整点最近的小时
-    hour_log_map = {}
+    person_logs = [log for log in emotion_logs.get(person_id, []) if log['timestamp'][:10] == today]
+    hour_emotion = [""] * 12  # 7 AM 到 6 PM，共12小时
+    hours = list(range(7, 19))
+
     for log in person_logs:
-        t = datetime.datetime.fromisoformat(log['timestamp'])
-        min_diff = 60 * 60
-        best_hour = None
-        for hour in hours:
-            dt_hour = t.replace(hour=hour, minute=0, second=0, microsecond=0)
-            diff = abs((t - dt_hour).total_seconds())
-            if diff < min_diff:
-                min_diff = diff
-                best_hour = hour
-        if best_hour not in hour_log_map or min_diff < hour_log_map[best_hour][1]:
-            hour_log_map[best_hour] = (log, min_diff)
-    # 统计每小时情绪
-    hour_emotion = []
-    for hour in hours:
-        if hour in hour_log_map:
-            hour_emotion.append(hour_log_map[hour][0]['emotion'])
-        else:
-            hour_emotion.append("")
+        timestamp = datetime.datetime.fromisoformat(log['timestamp'])
+        best_hour = min(hours, key=lambda hour: abs((timestamp - timestamp.replace(hour=hour, minute=0)).total_seconds()))
+        hour_emotion[best_hour - 7] = log['emotion']
 
     emotions = [emotion_emoji.get(e, "") for e in hour_emotion]
-
-    fig, ax = plt.subplots(figsize=(8,8), dpi=100)
-    fig.patch.set_facecolor('black')
+    fig, ax = plt.subplots(figsize=(8, 8), dpi=100)
     ax.set_facecolor('black')
     ax.axis('off')
     ax.set_aspect('equal')
-
     n = 12
     radius = 1.0
-    d = 0.2  # 竖直方向偏移
-
+    d = 0.2
     theta0 = -2 * np.pi / 3  # -120度
     for i in range(n):
         theta = theta0 - i * np.pi / 6
         x0 = radius * np.cos(theta)
         y0 = radius * np.sin(theta)
         ax.text(x0, y0, emotions[i], fontsize=40, ha='center', va='center', color='white')
-        ax.text(x0, y0 + d, times[i], fontsize=14, ha='center', va='bottom', color='white')
+        ax.text(x0, y0 + d, str(hours[i]), fontsize=14, ha='center', va='bottom', color='white')
 
     # 时针指向当前小时
     now = datetime.datetime.now()
-    # 超过半小时就进位到下一个小时
     hour = now.hour
     if now.minute >= 30:
         hour += 1
@@ -230,13 +184,9 @@ def get_emotion_clock_img(emotion_logs, person_id):
     print(f"情绪时钟已保存到 {output_path}")
     return img_cv
 
-# ----------------- 显示对话和时钟的函数 -----------------
+# ------------------ 运行显示情绪与对话 ---------------------
 def show_dialog_clock_emotion(dialog_text, clock_img, most_common_emotion):
-    global black_root
-    if black_root:
-        black_root.destroy()
-        black_root = None
-        
+    """在全屏显示情绪表情和对话内容。"""
     monitor = get_monitors()[1]
     screen_w, screen_h = monitor.width, monitor.height
 
@@ -262,7 +212,7 @@ def show_dialog_clock_emotion(dialog_text, clock_img, most_common_emotion):
         tk_img = ImageTk.PhotoImage(img)
         canvas.create_image(0, 0, anchor='nw', image=tk_img)
         canvas.image = tk_img
-        root.after(2000, show_text)  # 保持2秒后显示文本
+        root.after(2000, show_text)
 
     def show_text():
         canvas.delete("all")
@@ -279,7 +229,7 @@ def show_dialog_clock_emotion(dialog_text, clock_img, most_common_emotion):
             canvas.delete("all")
             img = Image.new('RGB', (screen_w, screen_h), color='black')
             draw = ImageDraw.Draw(img)
-            # 1) 已完全显示的整行
+            # 已完全显示的整行
             for idx in range(current_line_idx):
                 line = text_lines[idx]
                 bbox = draw.textbbox((0, 0), line, font=font_text)
@@ -287,7 +237,7 @@ def show_dialog_clock_emotion(dialog_text, clock_img, most_common_emotion):
                 h_line = bbox[3] - bbox[1]
                 y = int(screen_h * 0.5) + idx * h_line
                 draw.text(((screen_w - w_line) // 2, y), line, font=font_text, fill=(255,255,255))
-            # 2) 当前行的部分文本
+            # 当前行的部分文本
             if current_line_idx < len(text_lines):
                 line = text_lines[current_line_idx]
                 partial = line[:current_char_idx+1]
@@ -367,8 +317,9 @@ def show_dialog_clock_emotion(dialog_text, clock_img, most_common_emotion):
     root.after(500, show_emoji)  # 0.5秒后开始
     root.mainloop()
 
-
+# ------------------ 启动黑屏 ---------------------
 def init_black_screen():
+    """初始化并启动黑屏窗口。"""
     global black_root, black_canvas
     monitor = get_monitors()[1]
     black_root = tk.Tk()
@@ -380,18 +331,18 @@ def init_black_screen():
                              bg='black',
                              highlightthickness=0)
     black_canvas.pack(fill='both', expand=True)
-    # 开一个后台线程运行主循环，不阻塞后面的逻辑
+    # 开启后台线程运行主循环，不阻塞后续逻辑
     threading.Thread(target=black_root.mainloop, daemon=True).start()
 
-# ----------------- 初始化黑屏 -----------------
+# 启动黑屏
 init_black_screen()
 
-# ----------------- 打开摄像头 -----------------
+# ------------------ 打开摄像头 ---------------------
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     raise RuntimeError("无法打开摄像头")
 
-# ----------------- 初始化状态 -----------------
+# ------------------ 初始化状态 ---------------------
 face_present = False
 face_start_time = None
 face_end_time = None
@@ -405,7 +356,7 @@ most_common_emotion = None
 destroyWindow = False
 black_root = None
 
-# ----------------- 人脸检测和识别主循环 -----------------
+# ------------------ 人脸检测和识别主循环 ---------------------
 while True:
     ret, frame = cap.read()
     if not ret:
@@ -425,7 +376,7 @@ while True:
             dialog_start_time = None
             clock_img = None
         else:
-            # 人脸持续出现>2s且未开始识别，且未显示主情绪
+            # 人脸持续出现超过2秒并且未开始识别，且未显示主情绪
             if not recognizing and not main_emotion_displayed and time.time() - face_start_time >= 2:
                 recognizing = True  # 满2秒，开始识别
                 session_emotions = []  # 初始化情绪统计列表（人脸正对摄像头期间）
@@ -462,7 +413,7 @@ while True:
                     dialog_text = f"{conversation}"
                     dialog_start_time = time.time()                    
                     # 绘制时钟样式
-                    clock_img = get_emotion_clock_img(emotion_logs, session_person_id)
+                    clock_img = get_emotion_clock_img(session_person_id)
                     main_emotion_displayed = True  # 防止重复显示
         face_end_time = None  # 重置离开时间
     else:
@@ -533,7 +484,7 @@ while True:
                 person_id = person_name
 
             # 情绪识别
-            result = facepp_detect(FACEPP_API_KEY, FACEPP_API_SECRET, face_img) # 通过Face++ API进行情绪识别
+            result = facepp_detect(face_img) # 通过Face++ API进行情绪识别
             if result and "faces" in result and result["face_num"] > 0:
                 face = result["faces"][0]
                 attributes = face["attributes"]
@@ -568,7 +519,7 @@ while True:
         show_dialog_clock_emotion(dialog_text, clock_img, most_common_emotion)
     if destroyWindow:
         cv2.destroyWindow('Dialog & Clock')
-
+ 
     cv2.imshow('Video Feed', frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
